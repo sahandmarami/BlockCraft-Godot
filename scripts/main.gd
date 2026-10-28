@@ -14,7 +14,7 @@ var sun: DirectionalLight3D
 var world_env: WorldEnvironment
 var save_data := {}
 
-var rd := 3
+var rd := 2
 var spawn_pos := Vector3(8.5, 40, 8.5)
 var autosave_t := 0.0
 
@@ -191,16 +191,18 @@ func start_game(new_game: bool) -> void:
         for c in gen_list:
                 world.gen_chunk(c.x, c.y)
                 done += 1
-                load_bar.value = 100.0 * done / total
-                load_label.text = "در حال ساخت دنیا... %d%%" % int(100.0 * done / total)
-                await get_tree().process_frame
+                if done % 3 == 0:
+                        load_bar.value = 100.0 * done / total
+                        load_label.text = "در حال ساخت دنیا... %d%%" % int(100.0 * done / total)
+                        await get_tree().process_frame
         for c in mesh_list:
                 world.gen_chunk(c.x, c.y)
                 world._mesh_one(c.x, c.y)
                 done += 1
-                load_bar.value = 100.0 * done / total
-                load_label.text = "در حال ساخت دنیا... %d%%" % int(100.0 * done / total)
-                await get_tree().process_frame
+                if done % 3 == 0:
+                        load_bar.value = 100.0 * done / total
+                        load_label.text = "در حال ساخت دنیا... %d%%" % int(100.0 * done / total)
+                        await get_tree().process_frame
 
         # spawn on real terrain surface (after chunks exist)
         if not saved_spawn:
@@ -321,3 +323,10 @@ func _build_loading_ui() -> void:
         load_bar.show_percentage = false
         load_bar.custom_minimum_size = Vector2(520, 26)
         v.add_child(load_bar)
+        var tip := Label.new()
+        tip.text = "اولین بار ممکن است چند ثانیه طول بکشد — لطفاً صبر کنید"
+        tip.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+        tip.add_theme_font_override("font", load("res://assets/Vazirmatn-Regular.ttf"))
+        tip.add_theme_font_size_override("font_size", 17)
+        tip.add_theme_color_override("font_color", Color(0.62, 0.68, 0.62))
+        v.add_child(tip)
