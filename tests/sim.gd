@@ -34,15 +34,12 @@ func _process(_delta: float) -> bool:
                 var z = main.mobs._make_mob("zombie", main.player.global_position + Vector3(3, 1.2, 3))
                 main.mobs._mob_base_colors(z)
                 main.mobs.mobs.append(z)
-                main._test_z = z
         if frames == 1000:
                 if main.world == null or main.player == null:
                         print("SIM-FAIL: game not running")
                         return true
                 print("SIM-NIGHT tod=%.3f mobs=%d hp=%d" % [main.world.tod, main.mobs.mobs.size(), main.player.hp])
                 print("  kinds=", main.mobs.mobs.map(func(m): return m.kind))
-                if main.get("_test_z") != null:
-                        print("  test_zombie dist=%.2f pos=%s" % [main._test_z.root.position.distance_to(main.player.global_position), str(main._test_z.root.position)])
         if frames == 1500:
                 print("SIM-NIGHT2 tod=%.3f mobs=%d hp=%d dead=%s" % [main.world.tod, main.mobs.mobs.size(), main.player.hp, str(main.player.dead)])
         if frames == 1550 and main.player and not main.player.dead:
