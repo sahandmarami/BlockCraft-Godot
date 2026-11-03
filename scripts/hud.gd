@@ -1,0 +1,572 @@
+class_name GameHud extends CanvasLayer
+## Persian RTL touch HUD: Bedrock-style joystick, action buttons, hotbar,
+## hearts, menus. Joystick up = forward (Minecraft Bedrock convention).
+
+var main
+var player: PlayerCtl
+var world: VoxelWorld
+var mobs: MobMgr
+
+var font_reg: FontFile
+var font_bold: FontFile
+
+var joy_vec := Vector2.ZERO
+var _joy_touch := -1
+var _joy_center := Vector2(110, 110)   # center of the 220px pad
+var _joy_radius := 78.0                # knob travel radius
+var _dead_zone := 0.13
+var _look_touch := -1
+
+var root: Control
+var joy_pad: Panel
+var knob: Panel
+var hearts: Array = []
+var slots: Array = []
+var counts: Array = []
+var sel := 0
+var pause_panel: Control
+var death_panel: Control
+var pickup_label: Label
+var repeat_timer: Timer
+var _repeat_fn: Callable
+var sens := 1.0
+
+const SLOT = 54
+
+
+class JoyPad extends Panel:
+        ## Bedrock-style pad: subtle circle + 4 direction arrows.
+        func _draw() -> void:
+                var c := size / 2.0
+                var r := minf(c.x, c.y) - 6.0
+                # base ring
+                draw_arc(c, r, 0, TAU, 48, Color(1, 1, 1, 0.30), 3.0, true)
+                draw_arc(c, r * 0.62, 0, TAU, 40, Color(1, 1, 1, 0.10), 2.0, true)
+                # direction arrows
+                var a := Color(1, 1, 1, 0.38)
+                var s := 11.0
+                var d := r * 0.80
+                for rot in [0.0, PI / 2.0, PI, 3.0 * PI / 2.0]:
+                        var dir := Vector2(sin(rot), -cos(rot))
+                        var tip := c + dir * d
+                        var b1 := c + dir * (d - s) + dir.orthogonal() * (s * 0.62)
+                        var b2 := c + dir * (d - s) - dir.orthogonal() * (s * 0.62)
+                        draw_colored_polygon(PackedVector2Array([tip, b1, b2]), a)
+
+
+func _ready() -> void:
+        font_reg = load("res://assets/Vazirmatn-Regular.ttf")
+        font_bold = load("res://assets/Vazirmatn-Bold.ttf")
+
+        root = Control.new()
+        root.set_anchors_preset(Control.PRESET_FULL_RECT)
+        root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+        add_child(root)
+
+        _build_joystick()
+        _build_hotbar()
+        _build_hearts()
+        _build_buttons()
+        _build_crosshair()
+        _build_topbar()
+        _build_pause()
+        _build_death()
+
+        repeat_timer = Timer.new()
+        repeat_timer.wait_time = 0.26
+        repeat_timer.one_shot = false
+        repeat_timer.timeout.connect(_on_repeat)
+        add_child(repeat_timer)
+
+        if player:
+                player.inv_changed.connect(refresh_hotbar)
+                player.picked_up.connect(show_pickup)
+                player.hotbar_sel = sel
+        refresh_hotbar()
+
+
+func _label(text: String, size: int) -> Label:
+        var l := Label.new()
+        l.text = text
+        l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+        l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+        l.add_theme_font_override("font", font_bold)
+        l.add_theme_font_size_override("font_size", size)
+        l.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
+        l.add_theme_constant_override("shadow_offset_x", 2)
+        l.add_theme_constant_override("shadow_offset_y", 2)
+        l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+        return l
+
+
+func _btn(text: String, size: float, font_size: int) -> Button:
+        var b := Button.new()
+        b.text = text
+        b.custom_minimum_size = Vector2(size, size)
+        b.focus_mode = Control.FOCUS_NONE
+        b.add_theme_font_override("font", font_bold)
+        b.add_theme_font_size_override("font_size", font_size)
+        var sb := StyleBoxFlat.new()
+        sb.bg_color = Color(1, 1, 1, 0.15)
+        sb.set_corner_radius_all(int(size / 4.2))
+        sb.set_border_width_all(2)
+        sb.border_color = Color(1, 1, 1, 0.34)
+        sb.border_width_bottom = 4
+        b.add_theme_stylebox_override("normal", sb)
+        var sbp := sb.duplicate()
+        sbp.bg_color = Color(1, 1, 1, 0.38)
+        sbp.border_width_bottom = 1
+        b.add_theme_stylebox_override("pressed", sbp)
+        var sbh := sb.duplicate()
+        sbh.bg_color = Color(1, 1, 1, 0.24)
+        b.add_theme_stylebox_override("hover", sbh)
+        return b
+
+
+## Place a control by anchor point (ax, ay in 0/1) with top-left offsets.
+func _place(c: Control, ax: float, ay: float, off: Vector2, size: Vector2) -> void:
+        c.anchor_left = ax
+        c.anchor_right = ax
+        c.anchor_top = ay
+        c.anchor_bottom = ay
+        c.offset_left = off.x
+        c.offset_top = off.y
+        c.offset_right = off.x + size.x
+        c.offset_bottom = off.y + size.y
+        c.grow_horizontal = Control.GROW_DIRECTION_BOTH
+        c.grow_vertical = Control.GROW_DIRECTION_BOTH
+
+
+# ---------------- joystick (Minecraft Bedrock style) ----------------
+
+func _build_joystick() -> void:
+        joy_pad = JoyPad.new()
+        var sb := StyleBoxFlat.new()
+        sb.bg_color = Color(1, 1, 1, 0.10)
+        sb.set_corner_radius_all(110)
+        sb.set_border_width_all(3)
+        sb.border_color = Color(1, 1, 1, 0.26)
+        joy_pad.add_theme_stylebox_override("panel", sb)
+        _place(joy_pad, 0.0, 1.0, Vector2(30, -280), Vector2(220, 220))
+        joy_pad.mouse_filter = Control.MOUSE_FILTER_STOP
+        root.add_child(joy_pad)
+
+        knob = Panel.new()
+        var skb := StyleBoxFlat.new()
+        skb.bg_color = Color(1, 1, 1, 0.42)
+        skb.set_corner_radius_all(46)
+        skb.set_border_width_all(2)
+        skb.border_color = Color(1, 1, 1, 0.55)
+        knob.add_theme_stylebox_override("panel", skb)
+        knob.size = Vector2(92, 92)
+        knob.position = _joy_center - Vector2(46, 46)
+        knob.mouse_filter = Control.MOUSE_FILTER_IGNORE
+        joy_pad.add_child(knob)
+
+        joy_pad.gui_input.connect(_on_joy_input)
+
+
+func _on_joy_input(ev: InputEvent) -> void:
+        if ev is InputEventScreenTouch:
+                if ev.pressed:
+                        _joy_touch = ev.index
+                        _update_joy(ev.position)
+                elif ev.index == _joy_touch:
+                        _joy_touch = -1
+                        joy_vec = Vector2.ZERO
+                        knob.position = _joy_center - Vector2(46, 46)
+                        joy_pad.queue_redraw()
+        elif ev is InputEventScreenDrag and ev.index == _joy_touch:
+                _update_joy(ev.position)
+
+
+func _update_joy(p: Vector2) -> void:
+        # screen-space offset from pad center
+        var d := p - _joy_center
+        if d.length() > _joy_radius:
+                d = d.normalized() * _joy_radius
+        # BEDROCK FIX: screen y grows downward, but joystick up must be forward,
+        # so flip the vertical axis before reporting.
+        var n := Vector2(d.x, -d.y) / _joy_radius
+        var mag := n.length()
+        if mag < _dead_zone:
+                joy_vec = Vector2.ZERO
+        else:
+                var out := (mag - _dead_zone) / (1.0 - _dead_zone)
+                joy_vec = n / mag * out
+        knob.position = _joy_center + d - Vector2(46, 46)
+
+
+# ---------------- hotbar with counts ----------------
+
+func _build_hotbar() -> void:
+        var bar := HBoxContainer.new()
+        bar.add_theme_constant_override("separation", 6)
+        bar.anchor_left = 0.5
+        bar.anchor_right = 0.5
+        bar.anchor_top = 1.0
+        bar.anchor_bottom = 1.0
+        bar.grow_horizontal = Control.GROW_DIRECTION_BOTH
+        bar.grow_vertical = Control.GROW_DIRECTION_BEGIN
+        bar.offset_bottom = -16
+        bar.offset_top = -16 - SLOT
+        bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+        root.add_child(bar)
+        for i in PlayerCtl.SLOTS:
+                var slot := Panel.new()
+                var sb := StyleBoxFlat.new()
+                sb.bg_color = Color(0.05, 0.05, 0.08, 0.55)
+                sb.set_corner_radius_all(10)
+                sb.set_border_width_all(2)
+                sb.border_color = Color(1, 1, 1, 0.25)
+                slot.add_theme_stylebox_override("panel", sb)
+                slot.custom_minimum_size = Vector2(SLOT, SLOT)
+                slot.mouse_filter = Control.MOUSE_FILTER_STOP
+                var icon := TextureRect.new()
+                icon.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+                icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+                icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+                icon.set_anchors_preset(Control.PRESET_FULL_RECT)
+                icon.offset_left = 6
+                icon.offset_top = 6
+                icon.offset_right = -6
+                icon.offset_bottom = -6
+                icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+                slot.add_child(icon)
+                var cnt := _label("", 17)
+                cnt.set_anchors_preset(Control.PRESET_FULL_RECT)
+                cnt.offset_left = 18
+                cnt.offset_top = 20
+                cnt.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+                cnt.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
+                slot.add_child(cnt)
+                slot.gui_input.connect(_on_slot_input.bind(i))
+                bar.add_child(slot)
+                slots.append(slot)
+                counts.append(cnt)
+        select_slot(0)
+
+
+func _on_slot_input(ev: InputEvent, i: int) -> void:
+        if ev is InputEventScreenTouch and ev.pressed:
+                select_slot(i)
+                Sfx.play("click")
+
+
+func select_slot(i: int) -> void:
+        sel = clampi(i, 0, PlayerCtl.SLOTS - 1)
+        if player:
+                player.hotbar_sel = sel
+        _style_slots()
+
+
+func refresh_hotbar() -> void:
+        if player == null:
+                return
+        for i in slots.size():
+                var icon: TextureRect = slots[i].get_child(0)
+                var cnt: Label = counts[i]
+                var id := player.slot_id(i)
+                if id == Blocks.AIR:
+                        icon.texture = null
+                        cnt.text = ""
+                else:
+                        icon.texture = Tex.atlas_texture_for_tile(Blocks.ICON_TILE.get(id, 3))
+                        var n := player.count_of(id)
+                        cnt.text = str(n) if n > 1 else ""
+        _style_slots()
+
+
+func _style_slots() -> void:
+        for j in slots.size():
+                var ns := StyleBoxFlat.new()
+                ns.set_corner_radius_all(10)
+                var empty: bool = player == null or player.slot_id(j) == Blocks.AIR
+                if j == sel:
+                        ns.set_border_width_all(3)
+                        ns.border_color = Color(1.0, 0.85, 0.25)
+                        ns.bg_color = Color(0.1, 0.1, 0.14, 0.75)
+                else:
+                        ns.set_border_width_all(2)
+                        ns.border_color = Color(1, 1, 1, 0.25)
+                        ns.bg_color = Color(0.05, 0.05, 0.08, 0.55)
+                slots[j].modulate = Color(1, 1, 1, 0.42) if (empty and j != sel) else Color(1, 1, 1, 1)
+                slots[j].add_theme_stylebox_override("panel", ns)
+
+
+# ---------------- pickup toast ----------------
+
+func show_pickup(text: String) -> void:
+        if pickup_label == null:
+                pickup_label = _label("", 24)
+                pickup_label.anchor_left = 0.5
+                pickup_label.anchor_right = 0.5
+                pickup_label.anchor_top = 1.0
+                pickup_label.anchor_bottom = 1.0
+                pickup_label.grow_horizontal = Control.GROW_DIRECTION_BOTH
+                pickup_label.grow_vertical = Control.GROW_DIRECTION_BEGIN
+                pickup_label.offset_bottom = -90
+                pickup_label.offset_top = -124
+                pickup_label.add_theme_color_override("font_color", Color(0.72, 1.0, 0.6))
+                root.add_child(pickup_label)
+        pickup_label.text = "+ " + text
+        pickup_label.modulate = Color(1, 1, 1, 1)
+        var tw := create_tween()
+        tw.tween_interval(0.7)
+        tw.tween_property(pickup_label, "modulate:a", 0.0, 0.6)
+
+
+# ---------------- hearts ----------------
+
+func _build_hearts() -> void:
+        var row := HBoxContainer.new()
+        row.add_theme_constant_override("separation", 2)
+        row.position = Vector2(18, 14)
+        row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+        root.add_child(row)
+        for i in 10:
+                var h := TextureRect.new()
+                h.texture = Tex.heart(true)
+                h.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+                h.custom_minimum_size = Vector2(26, 26)
+                h.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+                h.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+                h.mouse_filter = Control.MOUSE_FILTER_IGNORE
+                row.add_child(h)
+                hearts.append(h)
+
+
+func set_hp(hp: int) -> void:
+        for i in 10:
+                if hp >= i * 2 + 2:
+                        hearts[i].texture = Tex.heart(true)
+                        hearts[i].self_modulate = Color(1, 1, 1, 1)
+                elif hp == i * 2 + 1:
+                        hearts[i].texture = Tex.heart(true)
+                        hearts[i].self_modulate = Color(1, 1, 1, 0.45)
+                else:
+                        hearts[i].texture = Tex.heart(false)
+                        hearts[i].self_modulate = Color(1, 1, 1, 1)
+
+
+# ---------------- action buttons ----------------
+
+func _build_buttons() -> void:
+        var b_jump := _btn("پرش", 92, 22)
+        _place(b_jump, 1.0, 1.0, Vector2(-112, -112), Vector2(92, 92))
+        b_jump.button_down.connect(_on_jump_down)
+        root.add_child(b_jump)
+
+        var b_break := _btn("شکستن", 86, 19)
+        _place(b_break, 1.0, 1.0, Vector2(-216, -106), Vector2(86, 86))
+        _hold_button(b_break, _act_break)
+        root.add_child(b_break)
+
+        var b_place := _btn("گذاشتن", 86, 19)
+        _place(b_place, 1.0, 1.0, Vector2(-108, -218), Vector2(86, 86))
+        _hold_button(b_place, _act_place)
+        root.add_child(b_place)
+
+        var b_atk := _btn("زدن", 86, 22)
+        _place(b_atk, 1.0, 1.0, Vector2(-218, -218), Vector2(86, 86))
+        _hold_button(b_atk, _act_attack)
+        root.add_child(b_atk)
+
+
+func _on_jump_down() -> void:
+        if player:
+                player.jump_req = true
+
+
+func _act_break() -> void:
+        if player:
+                player.do_break()
+
+
+func _act_place() -> void:
+        if player:
+                player.do_place(player.selected_id())
+
+
+func _act_attack() -> void:
+        if player and mobs:
+                mobs.hit_in_front(player.eye_pos(), player.look_dir())
+
+
+func _hold_button(b: Button, fn: Callable) -> void:
+        b.button_down.connect(func():
+                _repeat_fn = fn
+                fn.call()
+                repeat_timer.start())
+        b.button_up.connect(func(): repeat_timer.stop())
+
+
+func _on_repeat() -> void:
+        if _repeat_fn.is_valid():
+                _repeat_fn.call()
+
+
+func _build_crosshair() -> void:
+        var dot := Panel.new()
+        var sb := StyleBoxFlat.new()
+        sb.bg_color = Color(1, 1, 1, 0.8)
+        sb.set_corner_radius_all(3)
+        sb.set_border_width_all(1)
+        sb.border_color = Color(0, 0, 0, 0.5)
+        dot.add_theme_stylebox_override("panel", sb)
+        dot.anchor_left = 0.5
+        dot.anchor_right = 0.5
+        dot.anchor_top = 0.5
+        dot.anchor_bottom = 0.5
+        dot.offset_left = -3
+        dot.offset_top = -3
+        dot.offset_right = 3
+        dot.offset_bottom = 3
+        dot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+        root.add_child(dot)
+
+
+func _build_topbar() -> void:
+        var b_pause := _btn("مکث", 64, 20)
+        _place(b_pause, 1.0, 0.0, Vector2(-80, 14), Vector2(64, 64))
+        b_pause.pressed.connect(_open_pause)
+        root.add_child(b_pause)
+
+
+func _build_pause() -> void:
+        pause_panel = _overlay()
+        var panel := _center_panel(pause_panel, Vector2(440, 470))
+        var v := VBoxContainer.new()
+        v.add_theme_constant_override("separation", 14)
+        panel.add_child(v)
+
+        v.add_child(_label("مکث", 40))
+
+        var b_resume := _btn("ادامه بازی", 380, 24)
+        b_resume.custom_minimum_size = Vector2(380, 56)
+        b_resume.pressed.connect(_on_resume)
+        v.add_child(b_resume)
+
+        v.add_child(_label("صدا", 20))
+        var s_vol := HSlider.new()
+        s_vol.min_value = 0.0
+        s_vol.max_value = 1.0
+        s_vol.step = 0.05
+        s_vol.value = Sfx.volume
+        s_vol.custom_minimum_size = Vector2(380, 30)
+        s_vol.value_changed.connect(_on_vol)
+        v.add_child(s_vol)
+
+        v.add_child(_label("حساسیت نگاه", 20))
+        var s_sens := HSlider.new()
+        s_sens.min_value = 0.4
+        s_sens.max_value = 2.2
+        s_sens.step = 0.1
+        s_sens.value = sens
+        s_sens.custom_minimum_size = Vector2(380, 30)
+        s_sens.value_changed.connect(_on_sens)
+        v.add_child(s_sens)
+
+        var b_menu := _btn("ذخیره و بازگشت به منو", 380, 21)
+        b_menu.custom_minimum_size = Vector2(380, 52)
+        b_menu.pressed.connect(_on_back)
+        v.add_child(b_menu)
+
+
+func _on_resume() -> void:
+        pause_panel.visible = false
+        Sfx.play("click")
+
+
+func _on_vol(val: float) -> void:
+        Sfx.set_volume(val)
+
+
+func _on_sens(val: float) -> void:
+        sens = val
+        if player:
+                player.sens = val
+
+
+func _on_back() -> void:
+        pause_panel.visible = false
+        main.back_to_menu()
+
+
+func _open_pause() -> void:
+        pause_panel.visible = true
+        Sfx.play("click")
+
+
+func _build_death() -> void:
+        death_panel = _overlay()
+        var bg: ColorRect = death_panel.get_child(0)
+        bg.color = Color(0.45, 0.02, 0.02, 0.55)
+        var panel := _center_panel(death_panel, Vector2(440, 280))
+        var v := VBoxContainer.new()
+        v.add_theme_constant_override("separation", 18)
+        panel.add_child(v)
+        v.add_child(_label("مردی!", 46))
+        var b := _btn("تولد دوباره", 380, 24)
+        b.custom_minimum_size = Vector2(380, 56)
+        b.pressed.connect(_on_respawn)
+        v.add_child(b)
+
+
+func _on_respawn() -> void:
+        main.respawn()
+
+
+func _overlay() -> Control:
+        var ov := Control.new()
+        ov.set_anchors_preset(Control.PRESET_FULL_RECT)
+        ov.visible = false
+        root.add_child(ov)
+        var bg := ColorRect.new()
+        bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+        bg.color = Color(0, 0, 0, 0.5)
+        bg.mouse_filter = Control.MOUSE_FILTER_STOP
+        ov.add_child(bg)
+        return ov
+
+
+func _center_panel(ov: Control, size: Vector2) -> PanelContainer:
+        var pc := PanelContainer.new()
+        var sb := StyleBoxFlat.new()
+        sb.bg_color = Color(0.09, 0.1, 0.14, 0.92)
+        sb.set_corner_radius_all(18)
+        sb.set_border_width_all(2)
+        sb.border_color = Color(1, 1, 1, 0.15)
+        sb.set_content_margin_all(24.0)
+        pc.add_theme_stylebox_override("panel", sb)
+        pc.anchor_left = 0.5
+        pc.anchor_right = 0.5
+        pc.anchor_top = 0.5
+        pc.anchor_bottom = 0.5
+        pc.offset_left = -size.x / 2.0
+        pc.offset_top = -size.y / 2.0
+        pc.offset_right = size.x / 2.0
+        pc.offset_bottom = size.y / 2.0
+        pc.custom_minimum_size = size
+        ov.add_child(pc)
+        return pc
+
+
+func show_death() -> void:
+        death_panel.visible = true
+
+
+func hide_death() -> void:
+        death_panel.visible = false
+
+
+func _unhandled_input(ev: InputEvent) -> void:
+        # look drag: any touch not consumed by HUD controls
+        if ev is InputEventScreenTouch:
+                if ev.pressed:
+                        _look_touch = ev.index
+                elif ev.index == _look_touch:
+                        _look_touch = -1
+        elif ev is InputEventScreenDrag and ev.index == _look_touch:
+                if player:
+                        player.apply_look(ev.relative.x, ev.relative.y)
